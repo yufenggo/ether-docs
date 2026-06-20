@@ -332,10 +332,96 @@ sequenceDiagram
 
 ---
 
+## ④ LDAP / AD 登录 ✅（可复用认证器，配置驱动，不存密码）
+
+> gale 优先核对：**gale 无 LDAP 能力**（源码 0 命中、模块清单无、go.mod 无依赖）。
+> 按"gale 没有"分支自建：用社区事实标准 `github.com/go-ldap/ldap/v3`，作为业务模块接入 gale 生命周期；
+> **LDAP 只负责"验一次密码"**，验通过后走 **① 的会话签发（gale JWT）**，之后请求不再接触 LDAP。
+> 本节结论均有社区/权威出处佐证（见末尾）。
+
+### 设计目标（按你的决策）
+1. **可复用认证器**：一套统一 LDAP 认证逻辑，行为全由配置决定；平台与各租户走同一套代码。
+2. **每租户一份配置**：平台侧 LDAP 配置存**中心库**（控制平面）；各租户 LDAP 配置存**各自租户库**（数据平面，db-per-tenant 一致）。
+3. **平台/租户都不存 LDAP 用户密码**：直接用租户 LDAP 服务验证（Search+Bind），密码不落地。
+4. **前端单个"是否用 LDAP 登录"开关**：默认关=本地；勾上=走 LDAP。请求带布尔 `use_ldap`，**解决本地与 LDAP 同名账号冲突**（由用户显式指明这次走不走 LDAP，不靠猜测/回退；无需 local/ldap 两个按钮）。
+5. **用户组映射 LDAP 群组**：用户组（group）模型与 LDAP 群组映射规则**归块4 RBAC**，本节只留对接点。
+
+### 认证流程：Search + Bind（社区绝对主流）+ 前端 use_ldap 开关
+```mermaid
+sequenceDiagram
+  participant FE as 前端(开关:是否用LDAP)
+  participant API as 认证服务
+  participant CFG as LDAP配置(中心库/租户库)
+  participant DIR as 租户 LDAP/AD
+  participant DB as 用户库(中心/租户)
+  FE->>API: POST /login { use_ldap=true, username, password, captcha }
+  API->>API: 前置：trim 去空格；判空（拒空密码，CVE-2017-14623）；验 ② 验证码
+  API->>CFG: 读该租户 LDAP 配置(host/bindDN/filter/TLS/CA)
+  API->>API: SSRF 校验：协议白名单 + 私有网段拒绝 + 连接时再解析(防 DNS 重绑定)
+  API->>DIR: ① 服务账号 Bind（LDAPS/StartTLS，校验证书，InsecureSkipVerify=false）
+  API->>DIR: ② Search（ldap.EscapeFilter(username)）取用户 DN(+memberOf)
+  DIR-->>API: 用户 entry + DN(条目唯一全路径名)
+  API->>DIR: ③ 用 DN + 用户输入密码 Bind 验证
+  alt bind 失败
+    API->>API: ⑥ 失败计数（LDAP 独立阈值，压在 AD 之下）
+    API-->>FE: 统一失败文案（防枚举）
+  else 成功
+    API->>DB: JIT：查/建影子账号（承载用户组/RBAC），不存密码
+    API->>API: (块4) LDAP 群组 → 用户组映射（可配置，一期预留）
+    API->>API: 签发 AT/RT（转 ① 会话）；LDAP 退出链路
+    API-->>FE: 登录成功
+  end
+```
+
+> 术语：**Search+Bind**=先用只读服务账号搜出用户条目、再用用户密码二次绑定验证的两步认证模式；
+> **JIT**（Just-In-Time，即时建账）=首次 LDAP 登录成功时即时在本地建一条"影子账号"承载用户组/RBAC 角色，不写入密码；
+> **DN**（Distinguished Name）=目录中一个条目的唯一全路径名；**OU**（Organizational Unit，组织单元）=目录里的分组容器。
+
+### 安全清单（每条都有权威出处）
+1. **🔒 强制加密 LDAPS / StartTLS + 校验证书**：明文 389 会让 bind 密码明文过网；`InsecureSkipVerify=false`；**私有 CA 支持租户上传 CA 证书**（Authentik 做法）。
+2. **🚨 拒空密码（CVE-2017-14623, CVSS 8.1）**：旧版 go-ldap 空密码 `Bind()` 返回 nil 被误判成功。除依赖新版 `AllowEmptyPassword` 默认 false 外，**我们前置 `trim` 后主动判空拒绝**（防被后人误改）。
+3. **LDAP 注入转义**：用户名拼 filter/DN 前必过 `ldap.EscapeFilter()` 与 `ldap.EscapeDN()`（OWASP LDAP Injection）。
+4. **必须 Search+Bind，不拼 DN**：AD 用户分布在不同 OU，固定 DN 模板覆盖不全；Direct Bind 还有 DN 注入面、无法附加 `accountStatus`/`memberOf` 过滤。
+5. **SSRF 防护**（租户可填 LDAP 地址 = 攻击面）：协议白名单（只 `ldap(s)://`）+ 私有网段黑名单（RFC1918 / `127.0.0.0/8` / `169.254.0.0/16` / `::1`）+ **连接时再次解析校验 IP（防 DNS 重绑定）**+ 可选预注册白名单（最强）+ 禁用 referral 跟随（referral：LDAP 服务器返回的"去别处查"重定向，跟随会触发额外连接、扩大 SSRF 面）（OWASP SSRF Cheat Sheet）。
+6. **服务账号凭据保护**：bind DN 密码用 `gale.Encrypt` 加密存、环境/密钥管理注入、不入日志。
+7. **超时 + fail-closed**：LDAP 查询设超时；LDAP 不可达即**拒绝登录**，绝不放行；**不缓存密码**（不做离线登录）。连接池用外挂（go-ldap 无内置，如 `go-ldapool`），按 `tenant_code` 复用。
+
+### ⑥ 失败锁定可否复用 LDAP —— 判断：可复用，独立阈值
+- **机制复用**：锁定本质是"Redis 按账号计数 → 超阈值锁 → TTL → 解锁"，与验密方式无关。key 加"来源"维度（local / ldap，由 `use_ldap` 决定）即可，本地与 LDAP 共用同一套锁定原语（详见 ⑥）。
+- **本地阈值与 LDAP 阈值各自独立**：两者无大小关系。本地登录只有"我们一个计数器"，阈值随我们定（等保常见 5 次）。
+- **LDAP 阈值要小于的对象是"租户那台 AD 服务器自己的锁定策略"，不是本地阈值**：LDAP 登录存在**两层计数器**——① 我们自己的；② **AD 服务器内置的账号锁定策略**（我们控制不了）。**我们每发一次失败 bind，AD 那层计数就 +1**。若我们的阈值 ≥ AD，则在我们锁人之前，**AD 已先把该域账号在 AD 侧锁死**（波及该员工所有用 AD 的系统，不只本平台）。把我们的阈值设到**低于 AD**，就能**先于 AD 把登录挡在平台外**、不再继续向 AD 发失败 bind，**反而保护这个 AD 账号不被锁死**，也防被利用做 DoS（Netwrix / Microsoft 建议）。
+- **两个阈值都做成配置项，纳入 C2 配置中心**：**本地账号锁定阈值** 与 **LDAP 锁定阈值** 均为可调参数，**平台侧一份基线配置 + 按租户可调**（呼应 D4"全局基线 + 按租户收紧不放松"）。代码内置安全默认值兜底：本地默认 5（等保常见）、LDAP 默认保守 3–5，并提示租户把 LDAP 阈值设到低于其 AD 锁定策略。锁定窗口 / 解锁时长同为 C2 配置项。
+
+### 配置与存储（每租户一份）
+| 配置归属 | 存储位置 | 关键字段 |
+|---|---|---|
+| 平台侧 LDAP | 中心库（控制平面） | host/port、tls(ldaps/starttls)、ca_cert、bind_dn、**bind_pwd_enc**、base_dn、user_filter、attr_map、group_map、lock_threshold |
+| 各租户 LDAP | 各自租户库（数据平面） | 同上 |
+
+- bind 密码字段加密存（`gale.Encrypt`）；属性映射（`sAMAccountName`/`uid`/`mail` 等方言）每租户可配。
+
+### 与其他块的衔接
+- **① 会话**：LDAP 仅认证；**AD 中禁用账号**后已签发 JWT 仍有效 → 由同步 Job 检测禁用 → **删 `sess:{sid}`**（复用 ① 的会话中心化撤销，比 JWT 黑名单干净）。
+- **块4 RBAC**：用户组模型 + LDAP 群组→用户组映射规则在块4 定义；一期"只认证、授权用本地 RBAC 手工分配"，**群组映射逻辑一期预留接口、配置化，二期落地**（待块4 确认排期）。
+- **块2 C2 配置中心**：LDAP 各项、**本地 + LDAP 锁定阈值/窗口/解锁时长**、TLS/CA 等可调参数归 C2，平台级基线 + 按租户可调。
+- **C5 权益门控**：LDAP 为商业功能，按租户权益开关启用（你定过"LDAP 收费"）。
+
+### 决策状态
+- ✅ 已定：可复用认证器；每租户一份配置（平台中心库 / 租户各自库）；不存密码；前置 trim+判空；前端单个 `use_ldap` 开关（解决同名冲突）；Search+Bind；锁定机制复用 + LDAP 独立阈值（小于租户 AD 策略）；fail-closed 不缓存。
+- 🔶 待块4 确认：用户组模型形态与 LDAP 群组映射的一期/二期排期。
+
+### 出处（权威）
+- go-ldap/v3：[pkg.go.dev](https://pkg.go.dev/github.com/go-ldap/ldap/v3)；空密码修复 [PR #126](https://github.com/go-ldap/ldap/pull/126)、[CVE-2017-14623 / GHSA-x27w-qxhg-343v](https://github.com/advisories/GHSA-x27w-qxhg-343v)
+- OWASP：[LDAP Injection](https://cheatsheetseries.owasp.org/cheatsheets/LDAP_Injection_Prevention_Cheat_Sheet.html)、[SSRF Prevention](https://cheatsheetseries.owasp.org/cheatsheets/Server_Side_Request_Forgery_Prevention_Cheat_Sheet.html)、[Multi-Tenant Security](https://cheatsheetseries.owasp.org/cheatsheets/Multi_Tenant_Security_Cheat_Sheet.html)
+- 平台实现参考：[Grafana LDAP](https://grafana.com/docs/grafana/latest/setup-grafana/configure-access/configure-authentication/ldap/)、[GitLab LDAP](https://docs.gitlab.com/ee/administration/auth/ldap/)、[Keycloak LDAP](https://www.keycloak.org/docs/latest/server_admin/index.html)、[Authentik LDAP](https://docs.goauthentik.io/users-sources/sources/protocols/ldap/)
+- AD 锁定叠加：[Netwrix Account Lockout Best Practices](https://netwrix.com/en/resources/guides/account-lockout-best-practices/)
+
+---
+
 ## 待续（按"一个个过"逐项补）
 - ~~② 验证码~~ ✅ 已完成（gale 图形码 String 6 位 + Redis 自管校验 + TTL 120s 防膨胀，见上）
 - ~~③ 激活 / 设密 token 安全属性~~ ✅ 已完成（gale RandString+bcrypt+SHA256，存哈希不存明文，单飞，TTL 归 C2，邮件解耦块10，见上）
-- ④ LDAP 安全（LDAPS / 注入转义 / SSRF）
+- ~~④ LDAP 安全~~ ✅ 已完成（可复用认证器/每租户配置/不存密码/Search+Bind/SSRF/锁定复用，见上）
 - ⑤ MFA（二期，TOTP / Passkey）
 - ⑥ 登录失败锁定 / 防枚举
 
