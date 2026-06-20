@@ -17,7 +17,7 @@ last_reviewed: 2026-06-20
 
 ### 统一建模：租户用户 + 平台超管同一套会话
 - **租户用户**与**平台运营/超管**共用同一套 Session/AT/RT/撤销机制，只分 **plane（平台面 / 租户面）**：
-  登录入口不同（`/{tenant_code}` vs `/admin`），机制一致，仅 Redis key 命名空间不同（`ether:t:{tenant_code}:…` vs `ether:platform:…`）。
+  登录入口不同（`/{tenant_code}` vs `/admin`），机制一致，仅 Redis key 命名空间不同（`t:{tenant_code}:…` vs `platform:…`）。
 
 ### AT / RT 分工
 - **AT（access token，访问令牌）**：每次请求携带证明身份；**短命**（如 15 分钟）。**内含 `sid`（会话 ID）**。
@@ -120,21 +120,21 @@ sequenceDiagram
 
 ### Redis 命名空间 + Key 规则
 > 单 Redis、控制平面共享，必须 **应用前缀 + 租户段** 分层：防冲突、可按租户批量清理、区分平台面/租户面。
-> 约定：`ether:{域}:{…}`；**租户作用域 key 统一带 `t:{tenant_code}` 段**。
+> 约定：`{域}:{…}`；**租户作用域 key 统一带 `t:{tenant_code}` 段**。
 
 | 用途 | Key 模式 | Value | TTL | 写入 / 失效时机 |
 |---|---|---|---|---|
-| **会话记录**（撤销 / 轮换核心） | `ether:{plane}:sess:{sid}` | `{subject, plane, tenant_code, userId, deviceId, currentPairID, prevPairID, 签发时间}` | = RT 滑动寿命（如 7d） | 登录建；轮换更新 PairID+续期；撤销/踢人/登出删 |
-| **每用户会话索引** | `ether:{plane}:usess:{userId}` | Redis SET：`{sid…}` | 滑动续期 | 登录加入；并发控制/禁用按索引批量删；登出移除 |
-| 租户状态缓存（G8 一刀切） | `ether:tstatus:{tenant_code}` | `active/locked/pending_destroy…` | 短（30–60s） | 状态门读；平台改状态主动失效 |
-| 设密/激活 token（一次性） | `ether:setpw:{tokenHash}` | `{tid, userId, 用途}` | = 链接有效期 | 发链接写；用后即删 |
-| 登录失败计数 / 锁定 | `ether:{plane}:loginfail:{userId|ip}` / `…:lock:{…}` | 计数 / 锁定标记 | = 窗口 / 锁定时长 | 失败累加；超阈值置 lock；成功清零 |
-| 验证码（②会用） | `ether:captcha:{captchaId}` | 答案/校验态 | 短（2–5min） | 生成写；校验后即删 |
+| **会话记录**（撤销 / 轮换核心） | `{plane}:sess:{sid}` | `{subject, plane, tenant_code, userId, deviceId, currentPairID, prevPairID, 签发时间}` | = RT 滑动寿命（如 7d） | 登录建；轮换更新 PairID+续期；撤销/踢人/登出删 |
+| **每用户会话索引** | `{plane}:usess:{userId}` | Redis SET：`{sid…}` | 滑动续期 | 登录加入；并发控制/禁用按索引批量删；登出移除 |
+| 租户状态缓存（G8 一刀切） | `tstatus:{tenant_code}` | `active/locked/pending_destroy…` | 短（30–60s） | 状态门读；平台改状态主动失效 |
+| 设密/激活 token（一次性） | `setpw:{tokenHash}` | `{tid, userId, 用途}` | = 链接有效期 | 发链接写；用后即删 |
+| 登录失败计数 / 锁定 | `{plane}:loginfail:{userId|ip}` / `…:lock:{…}` | 计数 / 锁定标记 | = 窗口 / 锁定时长 | 失败累加；超阈值置 lock；成功清零 |
+| 验证码（②会用） | `captcha:{captchaId}` | 答案/校验态 | 短（2–5min） | 生成写；校验后即删 |
 
 > `plane` = `t:{tenant_code}`（租户面）或 `platform`（平台面，超管/运营）——统一建模、命名空间区分。
 
 - **校验请求**：验 AT 签名+过期 → 查 `sess:{sid}` 存活 → 查 `tstatus:{tenant_code}` → 都过才放行。
-- **租户销毁**：`SCAN ether:t:{tenant_code}:*` 批量删该租户全部 redis 痕迹。
+- **租户销毁**：`SCAN t:{tenant_code}:*` 批量删该租户全部 redis 痕迹。
 
 ### 撤销 / 禁用 / 并发：同一套会话操作，不同范围
 | 操作 | 本质 | 范围 | 额外 |
@@ -194,12 +194,12 @@ sequenceDiagram
   participant R as Redis
   FE->>API: GET /captcha
   API->>API: gale.NewCaptchaBase64(String, len=6)
-  API->>R: SET ether:captcha:{id} = answer EX 120（原子带过期）
+  API->>R: SET captcha:{id} = answer EX 120（原子带过期）
   API-->>FE: { captcha_id, image(base64 dataURL) }
   FE->>API: POST /login { user, pwd, captcha_id, captcha_input }
-  API->>R: GET ether:captcha:{captcha_id}
+  API->>R: GET captcha:{captcha_id}
   R-->>API: answer / nil
-  API->>R: DEL ether:captcha:{captcha_id}（命中即删，one-shot）
+  API->>R: DEL captcha:{captcha_id}（命中即删，one-shot）
   alt 验证码缺失/过期/不符
     API-->>FE: 400 验证码错误（前端刷新图）
   else 验证码通过
@@ -215,7 +215,7 @@ sequenceDiagram
 ### Redis key 与 TTL 设计（防无限扩张）
 | 用途 | key | value | TTL | 写入/清除 |
 |---|---|---|---|---|
-| 验证码答案 | `ether:captcha:{id}` | answer（6 字符） | **120s** | 生成时 `SET … EX 120`；校验命中即 `DEL`，否则到期自动驱逐 |
+| 验证码答案 | `captcha:{id}` | answer（6 字符） | **120s** | 生成时 `SET … EX 120`；校验命中即 `DEL`，否则到期自动驱逐 |
 
 **为什么不会无限膨胀（多层兜底）**：
 1. **TTL 自动回收是根本**：每个 key 生成即带 120s 过期，Redis 到期**自动驱逐**——
@@ -295,8 +295,8 @@ sequenceDiagram
 ### Redis key 与 TTL 设计（沿用 ② 防膨胀纪律）
 | 用途 | key | value | TTL | 清除 |
 |---|---|---|---|---|
-| token 主记录 | `ether:authtoken:{purpose}:{sha256(token)}` | `{user_id, tenant_code, purpose}` | 激活 24h / 重置 30m（C2 可调） | 设密成功即 `DEL`；否则到期自动驱逐 |
-| 单飞索引 | `ether:authtoken:owner:{purpose}:{user_id}` | 当前 token 的 sha256 | 同上 | 发新 token 时据此删旧主记录 |
+| token 主记录 | `authtoken:{purpose}:{sha256(token)}` | `{user_id, tenant_code, purpose}` | 激活 24h / 重置 30m（C2 可调） | 设密成功即 `DEL`；否则到期自动驱逐 |
+| 单飞索引 | `authtoken:owner:{purpose}:{user_id}` | 当前 token 的 sha256 | 同上 | 发新 token 时据此删旧主记录 |
 
 - **原子 `SET … EX`**（不可先 SET 后 EXPIRE，防孤儿 key，同 ②）；TTL 自动驱逐为根本，**无需定时清理**。
 
@@ -309,11 +309,11 @@ sequenceDiagram
   participant N as 块10 通知（解耦）
   OPS->>API: 创建租户 / 申请找回
   API->>API: token = gale.RandString(32)
-  API->>R: SET ether:authtoken:{purpose}:{sha256(token)} = {user,tenant,purpose} EX TTL（原子）
+  API->>R: SET authtoken:{purpose}:{sha256(token)} = {user,tenant,purpose} EX TTL（原子）
   API->>N: 投递"含明文 token 的链接"（事件，渠道由块10 决定）
   Note over OPS,N: 一期：链接可由平台界面出示，超管带外转交；邮件等渠道走块10
   OPS->>API: 打开落地页，POST { token, 新密码 }
-  API->>R: GET ether:authtoken:{purpose}:{sha256(token)}
+  API->>R: GET authtoken:{purpose}:{sha256(token)}
   R-->>API: 记录 / nil
   API->>R: DEL（命中即删，one-shot）
   alt token 缺失/过期/用途不符
