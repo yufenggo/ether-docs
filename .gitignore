@@ -1,0 +1,17 @@
+# 文档仓库：例外——.claude/（含 verify-docs.sh）与 scripts/ 是文档验证的一部分，
+# 需随仓提交，因此此处【不】忽略 .claude/。
+
+# 本地开发配置（*.local.* 不提交）
+# 注意：配置模板（template.yaml / *.template.* / *.example.*）必须提交，勿忽略
+*.local.*
+
+# 依赖与系统
+node_modules/
+.DS_Store
+
+# 渲染产物：mermaid 导出的图片可由 .md 源用 mmdc 重新生成，不提交（源 mermaid 已随仓版本化）
+**/diagrams/*.png
+**/diagrams/*.svg
+
+# OMC 运行产物（本地 agent 状态），不提交
+.omc/

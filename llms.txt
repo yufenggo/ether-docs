@@ -1,0 +1,18 @@
+# 项目文档
+
+> 项目的文档与方案中枢。本文件为 LLM 提供精选导航（llms.txt 约定）。
+
+## 核心
+- [README](README.md): 仓库总览与读法
+- [AGENTS](AGENTS.md): agent 工作约定
+- [项目目标](product/vision.md): 目标与范围
+- [技术栈](architecture/tech-stack.md): 选型现状
+- [架构总览](architecture/overview.md): 高层架构
+
+## 工作流
+- [在途方案说明](changes/README.md): 先出方案的生命周期
+- [规格目录](specs/README.md): 当前事实
+- [契约](contracts/README.md): 前后端协议
+
+## 模板
+- [_templates/](_templates/): proposal / design / tasks / spec / adr / archive
