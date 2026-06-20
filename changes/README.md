@@ -8,7 +8,7 @@ last_reviewed: 2026-06-19
 
 ## 进行中
 
-- [2026-06-platform-foundation](2026-06-platform-foundation/proposal.md) — 平台底座（多租户后台管理平台）立项（proposed）
+> 在途方案在 **「设计中」分支** 的 `changes/`；`main` 分支只保留已落地 / 冻结后并入 `specs/` 的成熟内容与归档摘要。
 
 ---
 
