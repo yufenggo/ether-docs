@@ -254,9 +254,87 @@ sequenceDiagram
 
 ---
 
+## ③ 激活 / 设密 / 重置密码 token ✅（基于 gale encryption + genx，Redis 自管，参数归 C2 配置中心）
+
+### 覆盖场景（同构：一次性带外凭证 out-of-band token）
+| 场景 | 触发 | 终态 |
+|---|---|---|
+| 租户管理员**首次激活 + 设密** | 平台创建租户后 | 设密 → 账号激活 → 可登录 |
+| **重置管理员密码** | 平台超管操作（见 G2：控制平面→租户库唯一高权写通道，双人复核） | 设新密 |
+| 终端用户**自助找回密码** | 用户点"忘记密码" | 设新密 |
+
+### gale 能力边界（我已读门面 `gale.go` + `encryption` 模块确认）
+| ③ 需要 | gale | 我们自补 |
+|---|---|---|
+| 高熵随机 token | ✅ `gale.RandString(32)`（crypto/rand） | — |
+| 密码哈希（设密产物） | ✅ `gale.HashPassword` / `CheckPassword`（bcrypt） | — |
+| token 指纹（存哈希不存明文） | ✅ `gale.SHA256String(token)` | — |
+| 存储 + 一次性 + 时效 | ✅ `gale.Redis()` SET EX / DEL | 业务自管 key/TTL（见下） |
+| 单飞作废旧 token（并发安全） | ✅ `gale.WithLock(ctx,key,ttl,fn)` | 按 user 加锁删旧 |
+| 申请接口限流 | ✅ `gale.RateLimitMiddlewareIP` | — |
+| **邮件 / 通知发送** | ❌ **gale 无邮件模块** | **解耦到块10**（见下） |
+
+> gale 模块清单已逐个核对，确无邮件/SMTP 模块。
+
+### 核心安全设计（成熟方案完整清单）
+1. **高熵随机**：`gale.RandString(32)`，62 字符集 ≈190 bit，不可猜举。
+2. **🔑 存哈希、不存明文**：Redis 只存 `SHA256(token)`，**明文 token 仅出现在发给用户的链接里**。即便 Redis 被读，泄露的是哈希、无法还原成可用链接；校验时把用户带回的 token 现哈希再比对。
+3. **一次性（one-shot）**：设密成功立即 `DEL`，防重放。
+4. **时效 TTL**（✅ 已采纳建议值，**具体值由 C2 配置中心可调**，下为默认兜底）：
+   - 激活 token：**默认 24h**（邮件/处理可能延迟）；
+   - 重置密码 token：**默认 30 分钟**（自助找回应短命，收窄被攻击窗口）。
+5. **绑定主体 + 用途**：token 记录 `{user_id, tenant_code, purpose}`，跨账号/跨用途不可重用。
+6. **单飞作废旧 token**：同一用户重新申请时旧 token 立即失效（`gale.WithLock` 按 user 加锁 + owner 索引删旧 key），避免多个有效 token 扩大被攻击面。
+7. **设密产物 bcrypt**：`gale.HashPassword`；设密时校验**密码强度**（长度/字符类，策略由 C2 配置中心下发，连等保2.0）。
+8. **防账号枚举**："忘记密码"接口无论账号是否存在都返回同一句"若存在将发送邮件"，不泄露账号存在性。
+9. **申请接口限流**：发起重置/重发激活按 **IP + 账号双维度**限流（`gale.RateLimitMiddlewareIP`）。
+10. **审计**：申请、设密成功/失败、token 过期 → 块6 审计。
+11. **激活闭环对接租户状态机**：验 token → 设密 → 把管理员/租户从「待激活」流转「正常」（对接已冻结 [../../specs/tenant.md](../../specs/tenant.md) 9 态机）→ `DEL` token。
+12. **链接传输**：仅 HTTPS；token 走**落地页 POST 提交**而非长留 URL query（query 易进服务端日志/Referer）。
+
+### Redis key 与 TTL 设计（沿用 ② 防膨胀纪律）
+| 用途 | key | value | TTL | 清除 |
+|---|---|---|---|---|
+| token 主记录 | `ether:authtoken:{purpose}:{sha256(token)}` | `{user_id, tenant_code, purpose}` | 激活 24h / 重置 30m（C2 可调） | 设密成功即 `DEL`；否则到期自动驱逐 |
+| 单飞索引 | `ether:authtoken:owner:{purpose}:{user_id}` | 当前 token 的 sha256 | 同上 | 发新 token 时据此删旧主记录 |
+
+- **原子 `SET … EX`**（不可先 SET 后 EXPIRE，防孤儿 key，同 ②）；TTL 自动驱逐为根本，**无需定时清理**。
+
+### 激活 + 设密流程
+```mermaid
+sequenceDiagram
+  participant OPS as 平台运营/用户
+  participant API as 认证服务
+  participant R as Redis
+  participant N as 块10 通知（解耦）
+  OPS->>API: 创建租户 / 申请找回
+  API->>API: token = gale.RandString(32)
+  API->>R: SET ether:authtoken:{purpose}:{sha256(token)} = {user,tenant,purpose} EX TTL（原子）
+  API->>N: 投递"含明文 token 的链接"（事件，渠道由块10 决定）
+  Note over OPS,N: 一期：链接可由平台界面出示，超管带外转交；邮件等渠道走块10
+  OPS->>API: 打开落地页，POST { token, 新密码 }
+  API->>R: GET ether:authtoken:{purpose}:{sha256(token)}
+  R-->>API: 记录 / nil
+  API->>R: DEL（命中即删，one-shot）
+  alt token 缺失/过期/用途不符
+    API-->>OPS: 400 链接无效或已过期
+  else 通过
+    API->>API: 校验密码强度 → gale.HashPassword 存储
+    API->>API: 租户/管理员状态机「待激活→正常」
+    API-->>OPS: 设密成功，可登录
+  end
+```
+
+### 已确认 / 归口 / 待你确认
+- ✅ **邮件通道解耦到块10**：auth 只产出"token + 链接"并投递**通知事件**，**不含发送实现**。块10 这类"对外能力"后续可演进为**通用通知总线**（事件驱动，类比审计横切）。
+- ✅ **TTL 取值**采纳建议（激活 24h / 重置 30m）。
+- 🔶 **建议（待你确认）：可调安全参数归口块2 C2 系统配置中心**——token TTL、密码强度策略、验证码类型/位数/TTL、（后续）登录失败锁定阈值等,统一由 C2 配置中心下发,**代码内置安全默认值兜底**;平台级基线 + 按租户可收紧（呼应 D4 合规"全局基线+按租户收紧不放松"）。一期 C2 仅做"基础配置读取"，安全参数纳管范围请你拍。
+
+---
+
 ## 待续（按"一个个过"逐项补）
 - ~~② 验证码~~ ✅ 已完成（gale 图形码 String 6 位 + Redis 自管校验 + TTL 120s 防膨胀，见上）
-- ③ 激活 / 设密 token 安全属性
+- ~~③ 激活 / 设密 token 安全属性~~ ✅ 已完成（gale RandString+bcrypt+SHA256，存哈希不存明文，单飞，TTL 归 C2，邮件解耦块10，见上）
 - ④ LDAP 安全（LDAPS / 注入转义 / SSRF）
 - ⑤ MFA（二期，TOTP / Passkey）
 - ⑥ 登录失败锁定 / 防枚举
