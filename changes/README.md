@@ -9,7 +9,8 @@ last_reviewed: 2026-06-19
 ## 进行中
 
 - [2026-06-platform-foundation](2026-06-platform-foundation/proposal.md) — 平台底座（多租户后台管理平台）立项（proposed）
-- [2026-06-dispatch-foundation](2026-06-dispatch-foundation/design.md) — Dispatch 可靠异步投递底座（横切地基，等价数据源模块地位）（draft）
+- [2026-06-dispatch-foundation](2026-06-dispatch-foundation/design.md) — Dispatch 可靠异步投递底座（横切地基，等价数据源模块地位）（已冻结 DF-1）
+- [2026-06-notification](2026-06-notification/design.md) — 块10 通知（一期邮件，建在 Dispatch 之上）（draft）
 
 ---
 
