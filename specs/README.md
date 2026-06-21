@@ -16,6 +16,7 @@ last_reviewed: 2026-06-19
 - [tenant.md](tenant.md) — 租户（Tenant）模块设计（已确认 / 冻结 TF-1）
 - [auth.md](auth.md) — 身份与认证（Auth）模块设计（已确认 / 冻结 AF-1）
 - [dispatch.md](dispatch.md) — Dispatch 可靠异步投递底座设计（已确认 / 冻结 DF-1）
+- [notification.md](notification.md) — 通知模块（块10 · 邮件）设计（已确认 / 冻结 NF-1）
 
 ---
 ↑ [返回总索引](../README.md)
