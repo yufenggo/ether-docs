@@ -11,7 +11,8 @@ last_reviewed: 2026-06-19
 - [2026-06-platform-foundation](2026-06-platform-foundation/proposal.md) — 平台底座（多租户后台管理平台）立项（proposed）
 - [2026-06-dispatch-foundation](2026-06-dispatch-foundation/design.md) — Dispatch 可靠异步投递底座（横切地基，等价数据源模块地位）（已冻结 DF-1）
 - [2026-06-notification](2026-06-notification/design.md) — 块10 通知（一期邮件，建在 Dispatch 之上）（draft）
-- [2026-06-rbac](2026-06-rbac/design.md) — 块4 授权 RBAC（一期纯 RBAC + 数据级权限留口 + 防提权委派）（draft）
+- [2026-06-rbac](2026-06-rbac/design.md) — 块4 授权 RBAC（一期纯 RBAC + 数据级权限留口 + 防提权委派）（已冻结 RF-1）
+- [2026-06-audit](2026-06-audit/design.md) — 块6 审计（单表统一事件 + 合规必备字段 + 应用层 append-only）（已冻结 AUF-1）
 
 ---
 
