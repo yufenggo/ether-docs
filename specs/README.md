@@ -18,6 +18,7 @@ last_reviewed: 2026-06-19
 - [dispatch.md](dispatch.md) — Dispatch 可靠异步投递底座设计（已确认 / 冻结 DF-1）
 - [notification.md](notification.md) — 通知模块（块10 · 邮件）设计（已确认 / 冻结 NF-1）
 - [rbac.md](rbac.md) — 授权（RBAC）模块设计（块4 · 已确认 / 冻结 RF-1）
+- [audit.md](audit.md) — 审计（Audit）模块设计（块6 · 已确认 / 冻结 AUF-1）
 
 ---
 ↑ [返回总索引](../README.md)
